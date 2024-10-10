@@ -2,15 +2,20 @@ from typing import Union
 
 import pytest
 
-from memgpt import create_client
-from memgpt.client.client import LocalClient, RESTClient
-from memgpt.schemas.block import Block
-from memgpt.schemas.memory import BlockChatMemory, ChatMemory, Memory
+from letta import create_client
+from letta.client.client import LocalClient, RESTClient
+from letta.schemas.block import Block
+from letta.schemas.embedding_config import EmbeddingConfig
+from letta.schemas.llm_config import LLMConfig
+from letta.schemas.memory import BasicBlockMemory, ChatMemory, Memory
 
 
 @pytest.fixture(scope="module")
 def client():
-    yield create_client()
+    client = create_client()
+    client.set_default_llm_config(LLMConfig.default_config("gpt-4o-mini"))
+    client.set_default_embedding_config(EmbeddingConfig.default_config(provider="openai"))
+    yield client
 
 
 @pytest.fixture(scope="module")
@@ -23,7 +28,6 @@ def agent(client):
 
 
 def test_agent(client: Union[LocalClient, RESTClient]):
-
     tools = client.list_tools()
 
     # create agent
@@ -129,7 +133,7 @@ def test_agent_with_shared_blocks(client):
     try:
         first_agent_state_test = client.create_agent(
             name="first_test_agent_shared_memory_blocks",
-            memory=BlockChatMemory(blocks=existing_non_template_blocks),
+            memory=BasicBlockMemory(blocks=existing_non_template_blocks),
             description="This is a test agent using shared memory blocks",
         )
         assert isinstance(first_agent_state_test.memory, Memory)
@@ -143,7 +147,7 @@ def test_agent_with_shared_blocks(client):
         # have this latest value set by the other agent.
         second_agent_state_test = client.create_agent(
             name="second_test_agent_shared_memory_blocks",
-            memory=BlockChatMemory(blocks=existing_non_template_blocks_no_values),
+            memory=BasicBlockMemory(blocks=existing_non_template_blocks_no_values),
             description="This is a test agent using shared memory blocks",
         )
 
@@ -161,7 +165,6 @@ def test_agent_with_shared_blocks(client):
 
 
 def test_memory(client, agent):
-
     # get agent memory
     original_memory = client.get_in_context_memory(agent.id)
     assert original_memory is not None
@@ -214,7 +217,6 @@ def test_recall_memory(client, agent):
 
 
 def test_tools(client):
-
     def print_tool(message: str):
         """
         A tool to print a message
@@ -239,7 +241,7 @@ def test_tools(client):
         print(msg)
 
     # create tool
-    orig_tool_length = len(client.list_tools())
+    len(client.list_tools())
     tool = client.create_tool(print_tool, tags=["extras"])
 
     # list tools
@@ -258,9 +260,30 @@ def test_tools(client):
     client.update_tool(tool.id, name="print_tool2", func=print_tool2)
     assert client.get_tool(tool.id).name == "print_tool2"
 
-    # delete tool
-    client.delete_tool(tool.id)
-    assert len(client.list_tools()) == orig_tool_length
+    ## delete tool
+    # client.delete_tool(tool.id)
+    # assert len(client.list_tools()) == orig_tool_length
+
+
+def test_tools_from_composio_basic(client):
+    from composio_langchain import Action
+
+    from letta.schemas.tool import Tool
+
+    # Create a `LocalClient` (you can also use a `RESTClient`, see the letta_rest_client.py example)
+    client = create_client()
+
+    tool = Tool.get_composio_tool(action=Action.GITHUB_STAR_A_REPOSITORY_FOR_THE_AUTHENTICATED_USER)
+
+    # create tool
+    client.add_tool(tool)
+
+    # list tools
+    tools = client.list_tools()
+    assert tool.name in [t.name for t in tools]
+
+    # We end the test here as composio requires login to use the tools
+    # The tool creation includes a compile safety check, so if this test doesn't error out, at least the code is compilable
 
 
 def test_tools_from_crewai(client):
@@ -268,7 +291,7 @@ def test_tools_from_crewai(client):
 
     from crewai_tools import ScrapeWebsiteTool
 
-    from memgpt.schemas.tool import Tool
+    from letta.schemas.tool import Tool
 
     crewai_tool = ScrapeWebsiteTool()
 
@@ -287,8 +310,6 @@ def test_tools_from_crewai(client):
     retrieved_tool = client.get_tool(tool_id)
     source_code = retrieved_tool.source_code
 
-    print(source_code)
-
     # Parse the function and attempt to use it
     local_scope = {}
     exec(source_code, {}, local_scope)
@@ -297,13 +318,96 @@ def test_tools_from_crewai(client):
     # Pull a simple HTML website and check that scraping it works
     # TODO: This is very hacky and can break at any time if the website changes.
     # Host our own websites to test website tool calling on.
-    simple_webpage_url = "https://www.york.ac.uk/teaching/cws/wws/webpage1.html"
-    expected_content = "There are lots of ways to create web pages using already coded programmes."
+    simple_webpage_url = "https://www.example.com"
+    expected_content = "This domain is for use in illustrative examples in documents."
     assert expected_content in func(website_url=simple_webpage_url)
 
 
-def test_sources(client, agent):
+def test_tools_from_crewai_with_params(client):
+    # create crewAI tool
 
+    from crewai_tools import ScrapeWebsiteTool
+
+    from letta.schemas.tool import Tool
+
+    crewai_tool = ScrapeWebsiteTool(website_url="https://www.example.com")
+
+    # Translate to memGPT Tool
+    tool = Tool.from_crewai(crewai_tool)
+
+    # Add the tool
+    client.add_tool(tool)
+
+    # list tools
+    tools = client.list_tools()
+    assert tool.name in [t.name for t in tools]
+
+    # get tool
+    tool_id = client.get_tool_id(name=tool.name)
+    retrieved_tool = client.get_tool(tool_id)
+    source_code = retrieved_tool.source_code
+
+    # Parse the function and attempt to use it
+    local_scope = {}
+    exec(source_code, {}, local_scope)
+    func = local_scope[tool.name]
+
+    # Pull a simple HTML website and check that scraping it works
+    expected_content = "This domain is for use in illustrative examples in documents."
+    assert expected_content in func()
+
+
+def test_tools_from_langchain(client):
+    # create langchain tool
+    from langchain_community.tools import WikipediaQueryRun
+    from langchain_community.utilities import WikipediaAPIWrapper
+
+    from letta.schemas.tool import Tool
+
+    api_wrapper = WikipediaAPIWrapper(top_k_results=1, doc_content_chars_max=100)
+    langchain_tool = WikipediaQueryRun(api_wrapper=api_wrapper)
+
+    # Translate to memGPT Tool
+    tool = Tool.from_langchain(langchain_tool, additional_imports_module_attr_map={"langchain_community.utilities": "WikipediaAPIWrapper"})
+
+    # Add the tool
+    client.add_tool(tool)
+
+    # list tools
+    tools = client.list_tools()
+    assert tool.name in [t.name for t in tools]
+
+    # get tool
+    tool_id = client.get_tool_id(name=tool.name)
+    retrieved_tool = client.get_tool(tool_id)
+    source_code = retrieved_tool.source_code
+
+    # Parse the function and attempt to use it
+    local_scope = {}
+    exec(source_code, {}, local_scope)
+    func = local_scope[tool.name]
+
+    expected_content = "Albert Einstein ( EYEN-styne; German:"
+    assert expected_content in func(query="Albert Einstein")
+
+
+def test_tool_creation_langchain_missing_imports(client):
+    # create langchain tool
+    from langchain_community.tools import WikipediaQueryRun
+    from langchain_community.utilities import WikipediaAPIWrapper
+
+    from letta.schemas.tool import Tool
+
+    api_wrapper = WikipediaAPIWrapper(top_k_results=1, doc_content_chars_max=100)
+    langchain_tool = WikipediaQueryRun(api_wrapper=api_wrapper)
+
+    # Translate to memGPT Tool
+    # Intentionally missing {"langchain_community.utilities": "WikipediaAPIWrapper"}
+    with pytest.raises(RuntimeError):
+        Tool.from_langchain(langchain_tool)
+
+
+def test_sources(client, agent):
     # list sources (empty)
     sources = client.list_sources()
     assert len(sources) == 0

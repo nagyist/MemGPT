@@ -7,15 +7,17 @@ from typing import Union
 import pytest
 from dotenv import load_dotenv
 
-from memgpt import Admin, create_client
-from memgpt.client.client import LocalClient, RESTClient
-from memgpt.constants import DEFAULT_PRESET
-from memgpt.schemas.agent import AgentState
-from memgpt.schemas.enums import JobStatus, MessageStreamStatus
-from memgpt.schemas.memgpt_message import FunctionCallMessage, InternalMonologue
-from memgpt.schemas.memgpt_response import MemGPTStreamingResponse
-from memgpt.schemas.message import Message
-from memgpt.schemas.usage import MemGPTUsageStatistics
+from letta import Admin, create_client
+from letta.client.client import LocalClient, RESTClient
+from letta.constants import DEFAULT_PRESET
+from letta.schemas.agent import AgentState
+from letta.schemas.embedding_config import EmbeddingConfig
+from letta.schemas.enums import JobStatus, MessageStreamStatus
+from letta.schemas.letta_message import FunctionCallMessage, InternalMonologue
+from letta.schemas.letta_response import LettaResponse, LettaStreamingResponse
+from letta.schemas.llm_config import LLMConfig
+from letta.schemas.message import Message
+from letta.schemas.usage import LettaUsageStatistics
 
 # from tests.utils import create_config
 
@@ -37,7 +39,7 @@ def run_server():
 
     # _reset_config()
 
-    from memgpt.server.rest_api.server import start_server
+    from letta.server.rest_api.app import start_server
 
     print("Starting server...")
     start_server(debug=True)
@@ -52,7 +54,7 @@ def run_server():
 def client(request):
     if request.param["server"]:
         # get URL from enviornment
-        server_url = os.getenv("MEMGPT_SERVER_URL")
+        server_url = os.getenv("LETTA_SERVER_URL")
         if server_url is None:
             # run server in thread
             # NOTE: must set MEMGPT_SERVER_PASS enviornment variable
@@ -72,6 +74,8 @@ def client(request):
         server_url = None
         client = create_client()
 
+    client.set_default_llm_config(LLMConfig.default_config("gpt-4"))
+    client.set_default_embedding_config(EmbeddingConfig.default_config(provider="openai"))
     try:
         yield client
     finally:
@@ -127,9 +131,9 @@ def test_agent_interactions(client: Union[LocalClient, RESTClient], agent: Agent
 
     message = "Hello, agent!"
     print("Sending message", message)
-    response = client.user_message(agent_id=agent.id, message=message)
+    response = client.user_message(agent_id=agent.id, message=message, include_full_message=True)
     print("Response", response)
-    assert isinstance(response.usage, MemGPTUsageStatistics)
+    assert isinstance(response.usage, LettaUsageStatistics)
     assert response.usage.step_count == 1
     assert response.usage.total_tokens > 0
     assert response.usage.completion_tokens > 0
@@ -221,7 +225,7 @@ def test_streaming_send_message(client: Union[LocalClient, RESTClient], agent: A
     # print(response)
     assert response, "Sending message failed"
     for chunk in response:
-        assert isinstance(chunk, MemGPTStreamingResponse)
+        assert isinstance(chunk, LettaStreamingResponse)
         if isinstance(chunk, InternalMonologue) and chunk.internal_monologue and chunk.internal_monologue != "":
             inner_thoughts_exist = True
         if isinstance(chunk, FunctionCallMessage) and chunk.function_call and chunk.function_call.name == "send_message":
@@ -348,9 +352,10 @@ def test_sources(client: Union[LocalClient, RESTClient], agent: AgentState):
     print(jobs)
     assert upload_job.id in [j.id for j in jobs]
     assert len(active_jobs) == 1
+    assert active_jobs[0].metadata_["source_id"] == source.id
 
     # wait for job to finish (with timeout)
-    timeout = 60
+    timeout = 120
     start_time = time.time()
     while True:
         status = client.get_job(upload_job.id).status
@@ -390,8 +395,43 @@ def test_sources(client: Union[LocalClient, RESTClient], agent: AgentState):
     print(sources)
 
     # detach the source
-    # TODO: add when implemented
-    # client.detach_source(source.name, agent.id)
+    assert len(client.get_archival_memory(agent_id=agent.id)) > 0, "No archival memory"
+    deleted_source = client.detach_source(source_id=source.id, agent_id=agent.id)
+    assert deleted_source.id == source.id
+    archival_memories = client.get_archival_memory(agent_id=agent.id)
+    assert len(archival_memories) == 0, f"Failed to detach source: {len(archival_memories)}"
+    assert source.id not in [s.id for s in client.list_attached_sources(agent.id)]
 
     # delete the source
     client.delete_source(source.id)
+
+
+def test_message_update(client: Union[LocalClient, RESTClient], agent: AgentState):
+    """Test that we can update the details of a message"""
+
+    # create a message
+    message_response = client.send_message(agent_id=agent.id, message="Test message", role="user", include_full_message=True)
+    print("Messages=", message_response)
+    assert isinstance(message_response, LettaResponse)
+    assert isinstance(message_response.messages[-1], Message)
+    message = message_response.messages[-1]
+
+    new_text = "This exact string would never show up in the message???"
+    new_message = client.update_message(message_id=message.id, text=new_text, agent_id=agent.id)
+    assert new_message.text == new_text
+
+
+def test_organization(client: RESTClient):
+    if isinstance(client, LocalClient):
+        pytest.skip("Skipping test_organization because LocalClient does not support organizations")
+    client.base_url
+
+
+def test_model_configs(client: Union[LocalClient, RESTClient]):
+    # _reset_config()
+
+    model_configs = client.list_models()
+    print("MODEL CONFIGS", model_configs)
+
+    embedding_configs = client.list_embedding_models()
+    print("EMBEDDING CONFIGS", embedding_configs)

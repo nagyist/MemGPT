@@ -2,14 +2,18 @@ import os
 import threading
 import time
 import uuid
+from typing import Union
 
 import pytest
 from dotenv import load_dotenv
 
-from memgpt import Admin, create_client
-from memgpt.agent import Agent
-from memgpt.constants import DEFAULT_PRESET
-from memgpt.schemas.memory import ChatMemory
+from letta import Admin, create_client
+from letta.agent import Agent
+from letta.client.client import LocalClient, RESTClient
+from letta.constants import DEFAULT_PRESET
+from letta.schemas.embedding_config import EmbeddingConfig
+from letta.schemas.llm_config import LLMConfig
+from letta.schemas.memory import ChatMemory
 
 test_agent_name = f"test_client_{str(uuid.uuid4())}"
 # test_preset_name = "test_preset"
@@ -30,7 +34,7 @@ def run_server():
 
     # _reset_config()
 
-    from memgpt.server.rest_api.server import start_server
+    from letta.server.rest_api.app import start_server
 
     print("Starting server...")
     start_server(debug=True)
@@ -43,6 +47,7 @@ def run_server():
     scope="module",
 )
 def client(request):
+
     if request.param["server"]:
         # get URL from enviornment
         server_url = os.getenv("MEMGPT_SERVER_URL")
@@ -67,6 +72,8 @@ def client(request):
     assert server_url is not None
     assert api_key.key is not None
     client = create_client(base_url=server_url, token=api_key.key)  # This yields control back to the test function
+    client.set_default_llm_config(LLMConfig.default_config("gpt-4o-mini"))
+    client.set_default_embedding_config(EmbeddingConfig.default_config(provider="openai"))
     try:
         yield client
     finally:
@@ -86,7 +93,7 @@ def agent(client):
     client.delete_agent(agent_state.id)
 
 
-def test_create_tool(client):
+def test_create_tool(client: Union[LocalClient, RESTClient]):
     """Test creation of a simple tool"""
 
     def print_tool(message: str):
@@ -104,14 +111,20 @@ def test_create_tool(client):
     tools = client.list_tools()
     print(f"Original tools {[t.name for t in tools]}")
 
-    tool = client.create_tool(print_tool, tags=["extras"])
+    tool = client.create_tool(print_tool, name="my_name", tags=["extras"])
 
     tools = client.list_tools()
     assert tool in tools, f"Expected {tool.name} in {[t.name for t in tools]}"
     print(f"Updated tools {[t.name for t in tools]}")
 
     # check tool id
-    tool = client.get_tool(tool.name)
+    tool = client.get_tool(tool.id)
+    assert tool is not None, "Expected tool to be created"
+    assert tool.id == tool.id, f"Expected {tool.id} to be {tool.id}"
+
+    # create agent with tool
+    agent_state = client.create_agent(tools=[tool.name])
+    response = client.user_message(agent_id=agent_state.id, message="hi")
 
 
 # TODO: add back once we fix admin client tool creation
